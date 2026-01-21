@@ -410,6 +410,61 @@ class Senec extends utils.Adapter {
     await this.evalPoll(JSON.parse(resp, reviverNumParse));
   }	
 
+  async syncSocketsControlFromPoll() {
+	if (!this.config.control_active) return;
+	if (!lalaConnected) return;
+
+	const count = await this._getSocketCount();
+
+	const setCtrl = async (socketIdx, key, val) => {
+		const id = this.namespace + `.control.sockets.${socketIdx}.${key}`;
+		await this.setStateChangedAsync(id, { val, ack: true });
+	};
+
+	const boolFields = [
+		["SOCKETS.ENABLE", "enable"],
+		["SOCKETS.POWER_ON", "power_on"],
+		["SOCKETS.FORCE_ON", "force_on"],
+		["SOCKETS.USE_TIME", "use_time"],
+	];
+
+	const u8Fields = [
+		["SOCKETS.SWITCH_ON_HOUR", "switch_on_hour"],
+		["SOCKETS.SWITCH_ON_MINUTE", "switch_on_minute"],
+		["SOCKETS.TIME_LIMIT", "time_limit"],
+		["SOCKETS.PRIORITY", "priority"],
+	];
+
+	const i4Fields = [
+		["SOCKETS.UPPER_LIMIT", "upper_limit"],
+		["SOCKETS.LOWER_LIMIT", "lower_limit"],
+	];
+
+	for (let i = 0; i < count; i++) {
+		for (const [srcBase, dstKey] of boolFields) {
+		const v = await this._getDpVal(`${srcBase}.${i}`);
+		if (v === null) continue;
+		await setCtrl(i, dstKey, Number(v) !== 0);
+		}
+
+		for (const [srcBase, dstKey] of u8Fields) {
+		const v = await this._getDpVal(`${srcBase}.${i}`);
+		if (v === null) continue;
+		const n = Number(v);
+		if (!Number.isFinite(n)) continue;
+		await setCtrl(i, dstKey, n);
+		}
+
+		for (const [srcBase, dstKey] of i4Fields) {
+		const v = await this._getDpVal(`${srcBase}.${i}`);
+		if (v === null) continue;
+		const n = Number(v);
+		if (!Number.isFinite(n)) continue;
+		await setCtrl(i, dstKey, n);
+		}
+	}
+  }
+
 	/**
 	 * Is called when adapter shuts down - callback has to be called under any circumstances!
 	 * @param {() => void} callback
@@ -1190,6 +1245,11 @@ class Senec extends utils.Adapter {
 						}
 					} else {
 						this.doState(key, ValueTyping(key, value2), desc, unit, false);
+					}
+					try {
+					  await this.syncSocketsControlFromPoll();
+					} catch (e) {
+					  this.log.warn("SOCKETS control sync failed: " + e);
 					}
 				}
 			}

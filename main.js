@@ -325,6 +325,14 @@ class Senec extends utils.Adapter {
     return Number.isFinite(n) && n > 0 && n < 16 ? n : 2;
   }
 
+  // NEW: helper to read a dp value (null if missing)
+  async _getDpVal(dp) {
+    const st = await this.getStateAsync(this.namespace + "." + dp);
+    if (!st) return null;
+    if (st.val === null || st.val === undefined) return null;
+    return st.val;
+  }
+
   async _readSocketsArray(dp) {
     const st = await this.getStateAsync(this.namespace + `.SOCKETS.${dp}`);
     if (!st || st.val === null || st.val === undefined) return null;

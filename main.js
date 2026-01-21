@@ -32,6 +32,11 @@ const batteryOff =
 //const blockDischargeOn = '{"ENERGY":{"SAFE_CHARGE_FORCE":"","SAFE_CHARGE_PROHIBIT":"","SAFE_CHARGE_RUNNING":"","LI_STORAGE_MODE_START":"","LI_STORAGE_MODE_STOP":"","LI_STORAGE_MODE_RUNNING":"","STAT_STATE":""}}';
 //const blockDischargeOff = '{"ENERGY":{"SAFE_CHARGE_FORCE":"","SAFE_CHARGE_PROHIBIT":"","SAFE_CHARGE_RUNNING":"","LI_STORAGE_MODE_START":"","LI_STORAGE_MODE_STOP":"","LI_STORAGE_MODE_RUNNING":"","STAT_STATE":""}}';
 
+// SOCKETS control (local via lala.cgi)
+// Fields are documented/observed on multiple systems:
+// ENABLE[], POWER_ON[], FORCE_ON[], USE_TIME[], SWITCH_ON_HOUR[], SWITCH_ON_MINUTE[],
+// UPPER_LIMIT[], LOWER_LIMIT[], TIME_LIMIT[], PRIORITY[], RESET_SWITCHED :contentReference[oaicite:1]{index=1}
+
 let apiConnected = false;
 let lalaConnected = false;
 let apiLoginToken = "";
@@ -136,6 +141,10 @@ class Senec extends utils.Adapter {
 				this.log.info("Active appliance control activated!");
 				await this.subscribeStatesAsync("control.*"); // subscribe on all state changes in control.
 				await this.subscribeStatesAsync("ENERGY.STAT_STATE");
+
+				// Add SOCKETS control states (writable) when appliance control is active
+				await this.initSocketsControlObjects();
+				await this.subscribeStatesAsync("control.sockets.*");
 			}
 		} catch (error) {
 			this.log.error(error);
@@ -178,6 +187,17 @@ class Senec extends utils.Adapter {
 						return;
 					}
 				}
+
+			  // SOCKETS control (contacts)
+			  if (lalaConnected && id.startsWith(this.namespace + ".control.sockets.")) {
+				try {
+					await this.handleSocketsControlStateChange(id, state.val);
+				} catch (error) {
+					this.log.error(error);
+					this.log.error("Failed to control SOCKETS via lala.cgi for " + id);
+					return;
+				}
+			  }
 			}
 			this.setStateAsync(id, { val: state.val, ack: true }); // Verarbeitung bestätigen
 		} else if (state && id === this.namespace + ".ENERGY.STAT_STATE") {
@@ -202,6 +222,193 @@ class Senec extends utils.Adapter {
 			}
 		}
 	}
+
+
+  // --------------------------------------------------------------------------
+  // SOCKETS Control helpers
+  // --------------------------------------------------------------------------
+
+  async initSocketsControlObjects() {
+    const root = "control.sockets";
+
+    await this.setObjectNotExistsAsync(root, {
+      type: "channel",
+      common: { name: "SOCKETS control (lala.cgi)" },
+      native: {},
+    });
+
+    // We create 2 sockets by default (many systems have 2). If NUMBER_OF_SOCKETS exists, user can still use first N.
+    for (let i = 0; i < 2; i++) {
+      const ch = `${root}.${i}`;
+      await this.setObjectNotExistsAsync(ch, {
+        type: "channel",
+        common: { name: `Socket ${i + 1}` },
+        native: {},
+      });
+
+      await this.setObjectNotExistsAsync(`${ch}.enable`, {
+        type: "state",
+        common: { name: "ENABLE", type: "boolean", role: "switch.enable", read: true, write: true, def: false },
+        native: {},
+      });
+      await this.setObjectNotExistsAsync(`${ch}.power_on`, {
+        type: "state",
+        common: { name: "POWER_ON", type: "boolean", role: "switch", read: true, write: true, def: false },
+        native: {},
+      });
+      await this.setObjectNotExistsAsync(`${ch}.force_on`, {
+        type: "state",
+        common: { name: "FORCE_ON", type: "boolean", role: "switch", read: true, write: true, def: false },
+        native: {},
+      });
+
+      await this.setObjectNotExistsAsync(`${ch}.use_time`, {
+        type: "state",
+        common: { name: "USE_TIME", type: "boolean", role: "switch.enable", read: true, write: true, def: false },
+        native: {},
+      });
+      await this.setObjectNotExistsAsync(`${ch}.switch_on_hour`, {
+        type: "state",
+        common: { name: "SWITCH_ON_HOUR", type: "number", role: "value", read: true, write: true, min: 0, max: 23, def: 0 },
+        native: {},
+      });
+      await this.setObjectNotExistsAsync(`${ch}.switch_on_minute`, {
+        type: "state",
+        common: { name: "SWITCH_ON_MINUTE", type: "number", role: "value", read: true, write: true, min: 0, max: 59, def: 0 },
+        native: {},
+      });
+      await this.setObjectNotExistsAsync(`${ch}.time_limit`, {
+        type: "state",
+        common: { name: "TIME_LIMIT", type: "number", role: "value", read: true, write: true, min: 0, def: 0, unit: "min" },
+        native: {},
+      });
+
+      await this.setObjectNotExistsAsync(`${ch}.upper_limit`, {
+        type: "state",
+        common: { name: "UPPER_LIMIT", type: "number", role: "value", read: true, write: true, def: 0, unit: "W" },
+        native: {},
+      });
+      await this.setObjectNotExistsAsync(`${ch}.lower_limit`, {
+        type: "state",
+        common: { name: "LOWER_LIMIT", type: "number", role: "value", read: true, write: true, def: 0, unit: "W" },
+        native: {},
+      });
+      await this.setObjectNotExistsAsync(`${ch}.priority`, {
+        type: "state",
+        common: { name: "PRIORITY", type: "number", role: "value", read: true, write: true, min: 0, max: 10, def: 0 },
+        native: {},
+      });
+    }
+
+    await this.setObjectNotExistsAsync(`${root}.reset_switched`, {
+      type: "state",
+      common: { name: "RESET_SWITCHED", type: "boolean", role: "button", read: true, write: true, def: false },
+      native: {},
+    });
+  }
+
+  _u8(v) {
+    const n = Math.max(0, Math.min(255, Number(v) || 0));
+    return "u8_" + n.toString(16).padStart(2, "0").toUpperCase();
+  }
+  _i4(v) {
+    // signed 32bit
+    let n = Number(v) || 0;
+    n = (n | 0); // force int32
+    const u = (n >>> 0);
+    return "i4_" + u.toString(16).padStart(8, "0").toUpperCase();
+  }
+
+  async _getSocketCount() {
+    const st = await this.getStateAsync(this.namespace + ".SOCKETS.NUMBER_OF_SOCKETS");
+    const n = st && st.val !== null && st.val !== undefined ? Number(st.val) : 2;
+    return Number.isFinite(n) && n > 0 && n < 16 ? n : 2;
+  }
+
+  async _readSocketsArray(dp) {
+    const st = await this.getStateAsync(this.namespace + `.SOCKETS.${dp}`);
+    if (!st || st.val === null || st.val === undefined) return null;
+    if (Array.isArray(st.val)) return st.val;
+    if (typeof st.val === "string") {
+      try {
+        const parsed = JSON.parse(st.val);
+        if (Array.isArray(parsed)) return parsed;
+      } catch (_) {
+        // ignore
+      }
+    }
+    return null;
+  }
+
+  async _buildArrayForWrite(dp, idx, newVal, encoder) {
+    const count = await this._getSocketCount();
+    const current = (await this._readSocketsArray(dp)) || new Array(count).fill(0);
+    const arr = new Array(count);
+    for (let i = 0; i < count; i++) {
+      const v = i === idx ? newVal : (current[i] ?? 0);
+      arr[i] = encoder(v);
+    }
+    return arr;
+  }
+
+  async handleSocketsControlStateChange(id, val) {
+    // id examples:
+    // senec.0.control.sockets.0.power_on
+    // senec.0.control.sockets.1.upper_limit
+    // senec.0.control.sockets.reset_switched
+    const rel = id.replace(this.namespace + ".control.sockets.", "");
+    const url = connectVia + this.config.senecip + "/lala.cgi";
+
+    if (rel === "reset_switched") {
+      // pulse reset
+      const payload = JSON.stringify({ SOCKETS: { RESET_SWITCHED: "u8_01" } });
+      this.log.info("SOCKETS: RESET_SWITCHED");
+      const resp = await this.doGet(url, payload, this, this.config.pollingTimeout, true);
+      await this.evalPoll(JSON.parse(resp, reviverNumParse));
+      // reset button state back to false (ack)
+      await this.setStateChangedAsync(this.namespace + ".control.sockets.reset_switched", { val: false, ack: true });
+      return;
+    }
+
+    const m = rel.match(/^(\d+)\.(.+)$/);
+    if (!m) throw new Error("Invalid sockets control id: " + id);
+    const idx = Number(m[1]);
+    const key = m[2];
+
+    // map control dp -> SOCKETS field + encoding
+    let field = null;
+    let encoder = null;
+    let payloadValue = null;
+
+    if (["enable", "power_on", "force_on", "use_time"].includes(key)) {
+      field =
+        key === "enable" ? "ENABLE" :
+        key === "power_on" ? "POWER_ON" :
+        key === "force_on" ? "FORCE_ON" :
+        "USE_TIME";
+      encoder = (v) => (v ? "u8_01" : "u8_00");
+      payloadValue = await this._buildArrayForWrite(field, idx, !!val, encoder);
+    } else if (["switch_on_hour", "switch_on_minute"].includes(key)) {
+      field = key === "switch_on_hour" ? "SWITCH_ON_HOUR" : "SWITCH_ON_MINUTE";
+      encoder = (v) => this._u8(v);
+      payloadValue = await this._buildArrayForWrite(field, idx, Number(val), encoder);
+    } else if (["time_limit", "priority"].includes(key)) {
+      field = key === "time_limit" ? "TIME_LIMIT" : "PRIORITY";
+      encoder = (v) => this._u8(v);
+      payloadValue = await this._buildArrayForWrite(field, idx, Number(val), encoder);
+    } else if (["upper_limit", "lower_limit"].includes(key)) {
+      field = key === "upper_limit" ? "UPPER_LIMIT" : "LOWER_LIMIT";
+      encoder = (v) => this._i4(v);
+      payloadValue = await this._buildArrayForWrite(field, idx, Number(val), encoder);
+    } else {
+      throw new Error("Unsupported sockets control key: " + key);
+    }
+
+    const payload = JSON.stringify({ SOCKETS: { [field]: payloadValue } });
+    this.log.info(`SOCKETS: set ${field}[${idx}] = ${JSON.stringify(val)}`);
+    const resp = await this.doGet(url, payload, this, this.config.pollingTimeout, true);
+    await this.evalPoll(JSON.parse(resp, reviverNumParse));
+  }	
 
 	/**
 	 * Is called when adapter shuts down - callback has to be called under any circumstances!

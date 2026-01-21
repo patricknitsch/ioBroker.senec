@@ -371,7 +371,8 @@ class Senec extends utils.Adapter {
       // pulse reset
       const payload = JSON.stringify({ SOCKETS: { RESET_SWITCHED: "u8_01" } });
       this.log.info("SOCKETS: RESET_SWITCHED");
-      const resp = await this.doGet(url, payload, this, this.config.pollingTimeout, true);
+      const cmdTimeout = Math.max(this.config.pollingTimeout, 15000);
+	  const resp = await this.doGet(url, payload, this, cmdTimeout, true);
       await this.evalPoll(JSON.parse(resp, reviverNumParse));
       // reset button state back to false (ack)
       await this.setStateChangedAsync(this.namespace + ".control.sockets.reset_switched", { val: false, ack: true });
@@ -414,7 +415,8 @@ class Senec extends utils.Adapter {
 
     const payload = JSON.stringify({ SOCKETS: { [field]: payloadValue } });
     this.log.info(`SOCKETS: set ${field}[${idx}] = ${JSON.stringify(val)}`);
-    const resp = await this.doGet(url, payload, this, this.config.pollingTimeout, true);
+	const cmdTimeout = Math.max(this.config.pollingTimeout, 15000);
+	const resp = await this.doGet(url, payload, this, cmdTimeout, true);
     await this.evalPoll(JSON.parse(resp, reviverNumParse));
   }	
 
